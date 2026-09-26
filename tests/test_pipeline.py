@@ -218,3 +218,90 @@ def test_descriptions_skip_ones_that_repeat_the_column_name(data_root: Path):
     text = column_descriptions(db_path)
     assert "GasStationID" not in text
     assert "grade: final exam grade" in text
+
+
+class RecordingModel(ScriptedModel):
+    def __init__(self, answers: list[str]):
+        super().__init__(answers)
+        self.prompts: list[str] = []
+
+    def complete(self, system_prompt: str, user_prompt: str) -> Completion:
+        self.prompts.append(user_prompt)
+        return super().complete(system_prompt, user_prompt)
+
+
+def school_db(data_root: Path) -> Path:
+    return data_root / "MINIDEV" / "dev_databases" / "school" / "school.sqlite"
+
+
+def test_self_correction_fixes_an_error(data_root: Path):
+    model = RecordingModel(["SELECT nope FROM students", "SELECT COUNT(*) FROM students"])
+    result = BaselineAgent(model, max_corrections=2).answer(school_db(data_root), "How many students?")
+    assert result.llm_calls == 2
+    assert result.execution.rows == [(3,)]
+    assert result.first_execution.error
+    assert "no such column: nope" in model.prompts[1]
+    assert "SELECT nope FROM students" in model.prompts[1]
+
+
+def test_self_correction_retries_empty_results(data_root: Path):
+    model = RecordingModel(["SELECT name FROM students WHERE name = 'asha'", "SELECT name FROM students WHERE name = 'Asha'"])
+    result = BaselineAgent(model, max_corrections=2).answer(school_db(data_root), "Is Asha a student?")
+    assert result.llm_calls == 2
+    assert result.execution.rows == [("Asha",)]
+    assert "returned no rows" in model.prompts[1]
+
+
+def test_self_correction_skips_good_answers_and_stops_when_unchanged(data_root: Path):
+    good = RecordingModel(["SELECT COUNT(*) FROM students"])
+    assert BaselineAgent(good, max_corrections=2).answer(school_db(data_root), "How many?").llm_calls == 1
+    stubborn = RecordingModel(["SELECT name FROM students WHERE grade > 100", "SELECT name FROM students WHERE grade > 100"])
+    result = BaselineAgent(stubborn, max_corrections=2).answer(school_db(data_root), "Who scored over 100?")
+    assert result.llm_calls == 2
+    assert result.execution.rows == []
+
+
+def test_self_correction_keeps_a_runnable_query_over_a_broken_retry(data_root: Path):
+    model = RecordingModel(["SELECT name FROM students WHERE grade > 100", "SELECT broken FROM", "SELECT also broken FROM"])
+    result = BaselineAgent(model, max_corrections=2).answer(school_db(data_root), "Who scored over 100?")
+    assert result.llm_calls == 3
+    assert result.execution.error is None
+    assert result.sql == "SELECT name FROM students WHERE grade > 100"
+
+
+def test_baseline_never_retries(data_root: Path):
+    model = RecordingModel(["SELECT nope FROM students"])
+    result = BaselineAgent(model).answer(school_db(data_root), "How many students?")
+    assert result.llm_calls == 1 and result.execution.error
+
+
+def test_retry_metrics_in_summary(data_root: Path, tmp_path: Path):
+    examples = load_examples(data_root)[:2]
+    model = RecordingModel(["SELECT nope FROM students", "SELECT COUNT(*) FROM students", "SELECT name FROM students WHERE grade > 80"])
+    output_path = tmp_path / "self_correct.jsonl"
+    run_evaluation(BaselineAgent(model, max_corrections=2), examples, data_root / "MINIDEV" / "dev_databases", output_path, progress=lambda message: None)
+    summary = summarize(output_path)
+    assert summary["execution_accuracy"] == 1.0
+    assert summary["questions_retried"] == 1
+    assert summary["fixed_by_retry"] == 1
+    assert summary["broken_by_retry"] == 0
+
+
+def test_daily_quota_is_not_retried():
+    from sql_agent.llm import is_retryable
+
+    daily = RuntimeError("429 RESOURCE_EXHAUSTED quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+    assert not is_retryable(daily)
+    assert is_retryable(RuntimeError("429 RESOURCE_EXHAUSTED quotaId: GenerateRequestsPerMinutePerProjectPerModel"))
+
+
+def test_same_id_and_text_with_different_sql_are_separate(data_root: Path, tmp_path: Path):
+    databases_dir = data_root / "MINIDEV" / "dev_databases"
+    examples = [
+        Example(137, "school", "Same wording", "", "SELECT COUNT(*) FROM students", "simple"),
+        Example(137, "school", "Same wording", "", "SELECT MAX(grade) FROM students", "simple"),
+    ]
+    output_path = tmp_path / "same.jsonl"
+    model = ScriptedModel(["SELECT COUNT(*) FROM students", "SELECT MAX(grade) FROM students"])
+    run_evaluation(BaselineAgent(model), examples, databases_dir, output_path, progress=lambda message: None)
+    assert summarize(output_path)["questions"] == 2

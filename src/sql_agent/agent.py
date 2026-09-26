@@ -13,10 +13,18 @@ SYSTEM_PROMPT = (
 )
 
 
+CORRECTION_INSTRUCTIONS = (
+    "Your previous query may be wrong. Read the problem below, then write a corrected SQLite query. "
+    "If you are confident the previous query already answers the question, return it unchanged. "
+    "Return only the SQL inside a ```sql code block."
+)
+
+
 @dataclass
 class AgentResult:
     sql: str
     execution: ExecutionResult
+    first_execution: ExecutionResult | None = None
     llm_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -33,6 +41,53 @@ def extract_sql(text: str) -> str:
     if match:
         candidate = candidate[match.start():]
     return candidate.strip().rstrip(";").strip()
+
+
+def format_preview(rows: list[tuple], limit: int = 5, width: int = 40) -> str:
+    lines = []
+    for row in rows[:limit]:
+        cells = [str(value) if len(str(value)) <= width else str(value)[:width] + "..." for value in row]
+        lines.append("  (" + ", ".join(cells) + ")")
+    return "\n".join(lines)
+
+
+def find_problem(execution: ExecutionResult, max_rows: int = 500) -> str | None:
+    if execution.timed_out:
+        return f"The query was stopped: {execution.error}. It is probably missing a join condition or filter."
+    if execution.error:
+        return f"The query failed with this error: {execution.error}"
+    if not execution.rows:
+        return (
+            "The query ran but returned no rows. Check the join conditions, the filter values "
+            "(spelling, letter case, date format), and that each column belongs to the table you used."
+        )
+    if all(value is None for row in execution.rows for value in row):
+        return "The query returned only NULL values. Check the columns, the joins, and whether a filter removed all matches."
+    if len(execution.rows) > max_rows:
+        return (
+            f"The query returned {len(execution.rows)} rows. If the question asks for a single value, "
+            "a count, or a top result, you may be missing an aggregation, a GROUP BY, or a LIMIT."
+        )
+    return None
+
+
+def build_correction_prompt(original_prompt: str, sql: str, problem: str, execution: ExecutionResult) -> str:
+    parts = [original_prompt, f"Previous query:\n```sql\n{sql}\n```", f"Problem: {problem}"]
+    if execution.rows:
+        parts.append(f"First rows returned:\n{format_preview(execution.rows)}")
+    parts.append(CORRECTION_INSTRUCTIONS)
+    return "\n\n".join(parts)
+
+
+def choose_final(attempts: list[tuple[str, ExecutionResult, str | None]]) -> tuple[str, ExecutionResult]:
+    for sql, execution, problem in reversed(attempts):
+        if problem is None:
+            return sql, execution
+    for sql, execution, problem in reversed(attempts):
+        if execution.error is None:
+            return sql, execution
+    sql, execution, _ = attempts[-1]
+    return sql, execution
 
 
 def build_user_prompt(schema_text: str, question: str, evidence: str, extra_sections: list[str] | None = None) -> str:
@@ -53,12 +108,14 @@ class BaselineAgent:
         sample_values: int = 0,
         use_descriptions: bool = False,
         use_value_matching: bool = False,
+        max_corrections: int = 0,
         timeout_seconds: float = 30.0,
     ):
         self.model = model
         self.sample_values = sample_values
         self.use_descriptions = use_descriptions
         self.use_value_matching = use_value_matching
+        self.max_corrections = max_corrections
         self.timeout_seconds = timeout_seconds
 
     def build_prompt(self, db_path: Path, question: str, evidence: str) -> str:
@@ -73,17 +130,37 @@ class BaselineAgent:
         return build_user_prompt(schema_text, question, evidence, extra_sections)
 
     def answer(self, db_path: Path, question: str, evidence: str = "") -> AgentResult:
-        completion = self.model.complete(SYSTEM_PROMPT, self.build_prompt(db_path, question, evidence))
-        sql = extract_sql(completion.text)
-        execution = execute_sql(db_path, sql, self.timeout_seconds)
+        original_prompt = self.build_prompt(db_path, question, evidence)
+        prompt = original_prompt
+        attempts: list[tuple[str, ExecutionResult, str | None]] = []
+        log: list[dict] = []
+        totals = {"calls": 0, "input": 0, "output": 0, "seconds": 0.0}
+        for attempt_number in range(self.max_corrections + 1):
+            completion = self.model.complete(SYSTEM_PROMPT, prompt)
+            totals["calls"] += 1
+            totals["input"] += completion.input_tokens
+            totals["output"] += completion.output_tokens
+            totals["seconds"] += completion.seconds
+            sql = extract_sql(completion.text)
+            execution = execute_sql(db_path, sql, self.timeout_seconds)
+            problem = find_problem(execution) if self.max_corrections else None
+            attempts.append((sql, execution, problem))
+            log.append({"raw_response": completion.text, "sql": sql, "error": execution.error,
+                        "rows": len(execution.rows), "problem": problem})
+            unchanged = attempt_number > 0 and sql.strip() == attempts[-2][0].strip()
+            if problem is None or unchanged or attempt_number == self.max_corrections:
+                break
+            prompt = build_correction_prompt(original_prompt, sql, problem, execution)
+        final_sql, final_execution = choose_final(attempts)
         return AgentResult(
-            sql=sql,
-            execution=execution,
-            llm_calls=1,
-            input_tokens=completion.input_tokens,
-            output_tokens=completion.output_tokens,
-            llm_seconds=completion.seconds,
-            attempts=[{"raw_response": completion.text, "sql": sql, "error": execution.error}],
+            sql=final_sql,
+            execution=final_execution,
+            first_execution=attempts[0][1],
+            llm_calls=totals["calls"],
+            input_tokens=totals["input"],
+            output_tokens=totals["output"],
+            llm_seconds=totals["seconds"],
+            attempts=log,
         )
 
 
@@ -93,6 +170,7 @@ VARIANTS = {
     "descriptions": {"use_descriptions": True},
     "value_match": {"use_value_matching": True},
     "descriptions_value_match": {"use_descriptions": True, "use_value_matching": True},
+    "self_correct": {"use_descriptions": True, "max_corrections": 2},
 }
 
 

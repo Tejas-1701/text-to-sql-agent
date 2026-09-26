@@ -39,6 +39,8 @@ def is_retryable(error: Exception) -> bool:
     if isinstance(error, (httpx.TransportError, ConnectionError, TimeoutError)):
         return True
     text = f"{type(error).__name__} {error}".lower()
+    if "perday" in text or "per day" in text:
+        return False
     markers = (
         "429", "resource_exhausted", "rate limit", "rate_limit", "ratelimit", "quota", "500", "502", "503", "504", "unavailable",
         "timeout", "timed out", "overloaded", "disconnect", "connection", "reset",

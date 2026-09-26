@@ -17,6 +17,7 @@ class Record:
     predicted_sql: str
     gold_sql: str
     correct: bool
+    first_attempt_correct: bool
     error: str | None
     gold_error: str | None
     llm_calls: int
@@ -27,21 +28,31 @@ class Record:
     attempts: list
 
 
-def example_key(question_id: int, question: str) -> tuple[int, str]:
-    return (question_id, question)
+def example_key(question_id: int, question: str, gold_sql: str) -> tuple[int, str, str]:
+    return (question_id, question, gold_sql.strip())
 
 
-def load_done_keys(output_path: Path) -> set[tuple[int, str]]:
+def record_key(record: dict) -> tuple[int, str, str]:
+    return example_key(record["question_id"], record["question"], record.get("gold_sql", ""))
+
+
+def read_records(output_path: Path) -> list[dict]:
+    return [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
+
+
+def load_done_keys(output_path: Path) -> set[tuple[int, str, str]]:
     if not output_path.exists():
         return set()
-    records = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
-    return {example_key(record["question_id"], record["question"]) for record in records}
+    return {record_key(record) for record in read_records(output_path)}
 
 
 def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_path: Path, progress=print) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     done_keys = load_done_keys(output_path)
-    pending = [example for example in examples if example_key(example.question_id, example.question) not in done_keys]
+    pending = [
+        example for example in examples
+        if example_key(example.question_id, example.question, example.gold_sql) not in done_keys
+    ]
     progress(f"{len(examples) - len(pending)} already done, {len(pending)} to run -> {output_path}")
     with output_path.open("a") as output_file:
         for position, example in enumerate(pending, start=1):
@@ -53,6 +64,7 @@ def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_p
                 progress(f"[{position}/{len(pending)}] q{example.question_id} stopped: {error}")
                 raise
             gold = execute_sql(db_path, example.gold_sql)
+            first_execution = result.first_execution or result.execution
             record = Record(
                 question_id=example.question_id,
                 db_id=example.db_id,
@@ -61,6 +73,7 @@ def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_p
                 predicted_sql=result.sql,
                 gold_sql=example.gold_sql,
                 correct=results_match(result.execution, gold),
+                first_attempt_correct=results_match(first_execution, gold),
                 error=result.execution.error,
                 gold_error=gold.error,
                 llm_calls=result.llm_calls,
@@ -73,11 +86,12 @@ def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_p
             output_file.write(json.dumps(asdict(record)) + "\n")
             output_file.flush()
             mark = "ok " if record.correct else "err" if record.error else "no "
-            progress(f"[{position}/{len(pending)}] {mark} q{example.question_id} {example.db_id}")
+            retries = f"  (+{record.llm_calls - 1} retry)" if record.llm_calls > 1 else ""
+            progress(f"[{position}/{len(pending)}] {mark} q{example.question_id} {example.db_id}{retries}")
 
 
 def summarize(output_path: Path, input_price_per_million: float = 0.0, output_price_per_million: float = 0.0) -> dict:
-    records = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
+    records = read_records(output_path)
     if not records:
         return {"file": output_path.name, "questions": 0}
     count = len(records)
@@ -100,6 +114,9 @@ def summarize(output_path: Path, input_price_per_million: float = 0.0, output_pr
         "avg_output_tokens": sum(record["output_tokens"] for record in records) / count,
         "cost_per_query_usd": cost / count,
         "avg_latency_seconds": sum(record["total_seconds"] for record in records) / count,
+        "questions_retried": sum(record["llm_calls"] > 1 for record in records),
+        "fixed_by_retry": sum(record["correct"] and not record.get("first_attempt_correct", record["correct"]) for record in records),
+        "broken_by_retry": sum(record.get("first_attempt_correct", record["correct"]) and not record["correct"] for record in records),
     }
 
 
@@ -116,9 +133,8 @@ def markdown_table(summaries: list[dict]) -> str:
     return "\n".join([header, divider, *rows])
 
 
-def load_outcomes(output_path: Path) -> dict[tuple[int, str], bool]:
-    records = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
-    return {example_key(record["question_id"], record["question"]): record["correct"] for record in records}
+def load_outcomes(output_path: Path) -> dict[tuple[int, str, str], bool]:
+    return {record_key(record): record["correct"] for record in read_records(output_path)}
 
 
 def mcnemar_exact_p(only_first: int, only_second: int) -> float:

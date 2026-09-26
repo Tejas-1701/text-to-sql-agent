@@ -51,6 +51,7 @@ On Windows, download [minidev.zip](https://bird-bench.oss-cn-beijing.aliyuncs.co
 sql-agent run --limit 5                       # quick smoke test
 sql-agent run --variant baseline              # 200-question subset
 sql-agent run --variant descriptions
+sql-agent run --variant self_correct
 sql-agent run --provider ollama --model qwen2.5-coder:7b --rpm 0
 sql-agent summary                             # prints the results table
 sql-agent compare results\A.jsonl results\B.jsonl   # fixed/broken counts and p-value
@@ -76,11 +77,12 @@ Each run writes one line per question to `results/`. If a run stops because of r
    - `descriptions_value_match`: both of the above.
 3. **Generate:** ask the model for one SQLite query.
 4. **Execute:** run it read-only with a 30-second timeout.
-5. **Compare:** check the result rows against the reference query.
+5. **Self-correct** (`self_correct` variant, built on `descriptions`): if the query fails, times out, returns no rows, returns only NULLs, or returns more than 500 rows, I send the query, the problem and the first rows back to the model and ask for a fix. It gets up to 2 extra attempts. It stops early if the model returns the same query, and it never swaps a query that ran for one that crashes.
+6. **Compare:** check the result rows against the reference query. For `self_correct` I also score the first attempt, so I can count how many answers the retries fixed and how many they broke.
 
 I compare variants question by question with `sql-agent compare` and McNemar's exact test, because a small change in overall accuracy can hide many questions that flipped in both directions.
 
-Coming next: a retry loop that sends errors, empty results and suspicious results back to the model, and majority voting over several candidate queries.
+Coming next: majority voting over several candidate queries.
 
 ## Project layout
 
