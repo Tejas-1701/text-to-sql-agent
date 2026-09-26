@@ -4,20 +4,25 @@ I'm building an agent that turns plain-English questions into SQL, runs the quer
 
 ## Results
 
-Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash-lite`, free tier.
+Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash-lite`, temperature 0.
 
-| Variant | Exec. accuracy | Exec. errors | Input tokens/query | Latency |
-|---|---|---|---|---|
-| Single-shot baseline | 58.5% | 1.5% | 1,077 | 6.9s |
-| + 3 sample values per column | 60.5% | 0.5% | 2,915 | 6.4s |
-| + column descriptions | | | | |
-| + values matched from the question | | | | |
-| + descriptions and matched values | | | | |
-| + self-correction | | | | |
+| Variant | Exec. accuracy | Exec. errors | Input tokens/query | Latency | Fixed / broken vs baseline | McNemar p |
+|---|---|---|---|---|---|---|
+| Single-shot baseline | 58.0% | 1.5% | 1,077 | 6.2s | | |
+| + 3 sample values per column | 57.0% | 0.0% | 2,915 | 6.2s | 5 / 7 | 0.77 |
+| + column descriptions | **61.0%** | 0.5% | 2,441 | 6.1s | 13 / 7 | 0.26 |
+| + values matched from the question | 59.0% | 1.0% | 1,114 | 7.4s | 9 / 7 | 0.80 |
+| + descriptions and matched values | 58.5% | 1.5% | 2,478 | 8.1s | 9 / 8 | 1.00 |
+| + self-correction | | | | | | |
 
-**Execution accuracy** means my query returns the same set of rows as the reference query.
+**Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice).
 
-Sample values gave +2 points, but it is not significant: 14 questions fixed, 10 broken, McNemar p = 0.54. It also used 2.7x the input tokens. Random sample values mostly add noise, so I tried two more targeted kinds of context next.
+### What I learned
+
+- **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs.
+- **Column descriptions were the only context that pointed the right way.** They fixed 13 questions and broke 7, but that is not significant at this sample size (p = 0.26).
+- **Random sample values and value matching did not help.** BIRD's hints already spell out most of the values a question needs, so finding them in the database adds little.
+- **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute, so a retry loop that only reacts to errors would barely help.
 
 ## Setup
 
