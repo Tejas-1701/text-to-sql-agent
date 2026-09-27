@@ -18,6 +18,7 @@ class Record:
     gold_sql: str
     correct: bool
     first_attempt_correct: bool
+    any_candidate_correct: bool
     error: str | None
     gold_error: str | None
     llm_calls: int
@@ -74,6 +75,9 @@ def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_p
                 gold_sql=example.gold_sql,
                 correct=results_match(result.execution, gold),
                 first_attempt_correct=results_match(first_execution, gold),
+                any_candidate_correct=any(
+                    results_match(candidate, gold) for candidate in (result.candidate_executions or [result.execution])
+                ),
                 error=result.execution.error,
                 gold_error=gold.error,
                 llm_calls=result.llm_calls,
@@ -86,8 +90,8 @@ def run_evaluation(agent, examples: list[Example], databases_dir: Path, output_p
             output_file.write(json.dumps(asdict(record)) + "\n")
             output_file.flush()
             mark = "ok " if record.correct else "err" if record.error else "no "
-            retries = f"  (+{record.llm_calls - 1} retry)" if record.llm_calls > 1 else ""
-            progress(f"[{position}/{len(pending)}] {mark} q{example.question_id} {example.db_id}{retries}")
+            note = f"  {result.note}" if result.note else ""
+            progress(f"[{position}/{len(pending)}] {mark} q{example.question_id} {example.db_id}{note}")
 
 
 def summarize(output_path: Path, input_price_per_million: float = 0.0, output_price_per_million: float = 0.0) -> dict:
@@ -115,8 +119,10 @@ def summarize(output_path: Path, input_price_per_million: float = 0.0, output_pr
         "cost_per_query_usd": cost / count,
         "avg_latency_seconds": sum(record["total_seconds"] for record in records) / count,
         "questions_retried": sum(record["llm_calls"] > 1 for record in records),
-        "fixed_by_retry": sum(record["correct"] and not record.get("first_attempt_correct", record["correct"]) for record in records),
-        "broken_by_retry": sum(record.get("first_attempt_correct", record["correct"]) and not record["correct"] for record in records),
+        "first_attempt_accuracy": sum(record.get("first_attempt_correct", record["correct"]) for record in records) / count,
+        "fixed_after_first_attempt": sum(record["correct"] and not record.get("first_attempt_correct", record["correct"]) for record in records),
+        "broken_after_first_attempt": sum(record.get("first_attempt_correct", record["correct"]) and not record["correct"] for record in records),
+        "any_candidate_correct": sum(record.get("any_candidate_correct", record["correct"]) for record in records) / count,
     }
 
 

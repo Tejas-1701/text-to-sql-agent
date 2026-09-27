@@ -10,19 +10,21 @@ Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash
 |---|---|---|---|---|---|---|
 | Single-shot baseline | 58.0% | 1.5% | 1,077 | 6.2s | | |
 | + 3 sample values per column | 57.0% | 0.0% | 2,915 | 6.2s | 5 / 7 | 0.77 |
-| + column descriptions | **61.0%** | 0.5% | 2,441 | 6.1s | 13 / 7 | 0.26 |
+| + column descriptions | 61.0% | 0.5% | 2,441 | 6.1s | 13 / 7 | 0.26 |
 | + values matched from the question | 59.0% | 1.0% | 1,114 | 7.4s | 9 / 7 | 0.80 |
 | + descriptions and matched values | 58.5% | 1.5% | 2,478 | 8.1s | 9 / 8 | 1.00 |
-| + self-correction | | | | | | |
+| + descriptions and self-correction | 58.5% | 0.0% | 2,861 | 6.9s | 12 / 11 | 1.00 |
+| + descriptions and 5-way voting | | | | | | |
 
-**Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice).
+**Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice with the same wording and reference SQL).
 
 ### What I learned
 
 - **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs.
-- **Column descriptions were the only context that pointed the right way.** They fixed 13 questions and broke 7, but that is not significant at this sample size (p = 0.26).
+- **Column descriptions may help, but I can't prove it.** They fixed 13 questions and broke 7 (p = 0.26). The self-correction run uses the same first prompt and its first attempts scored about 58%, so the 61% descriptions run was probably partly luck.
 - **Random sample values and value matching did not help.** BIRD's hints already spell out most of the values a question needs, so finding them in the database adds little.
-- **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute, so a retry loop that only reacts to errors would barely help.
+- **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute.
+- **Self-correction removes crashes but barely changes accuracy.** 24 of 200 questions triggered a retry (an error, no rows, only NULLs, or too many rows). The retries fixed 2 answers and broke 1, and took crashed queries from 1 to 3 per run down to 0. It costs 1.15 model calls per question on average. The wrong answers that remain run fine and return rows that look reasonable, so simple result checks can't spot them.
 
 ## Setup
 
@@ -52,6 +54,7 @@ sql-agent run --limit 5                       # quick smoke test
 sql-agent run --variant baseline              # 200-question subset
 sql-agent run --variant descriptions
 sql-agent run --variant self_correct
+sql-agent run --variant vote                  # 5 calls per question
 sql-agent run --provider ollama --model qwen2.5-coder:7b --rpm 0
 sql-agent summary                             # prints the results table
 sql-agent compare results\A.jsonl results\B.jsonl   # fixed/broken counts and p-value
@@ -78,11 +81,10 @@ Each run writes one line per question to `results/`. If a run stops because of r
 3. **Generate:** ask the model for one SQLite query.
 4. **Execute:** run it read-only with a 30-second timeout.
 5. **Self-correct** (`self_correct` variant, built on `descriptions`): if the query fails, times out, returns no rows, returns only NULLs, or returns more than 500 rows, I send the query, the problem and the first rows back to the model and ask for a fix. It gets up to 2 extra attempts. It stops early if the model returns the same query, and it never swaps a query that ran for one that crashes.
-6. **Compare:** check the result rows against the reference query. For `self_correct` I also score the first attempt, so I can count how many answers the retries fixed and how many they broke.
+6. **Vote** (`vote` variant, built on `descriptions`): I ask for 5 queries, one at temperature 0 and four at 0.7, and run them all. Queries that crash are dropped, empty results only count if nothing else ran, and the result returned by the most queries wins. Ties go to the earlier query, so the temperature-0 answer wins a tie.
+7. **Compare:** check the result rows against the reference query. For `self_correct` and `vote` I also score the first attempt, so I can count how many answers the extra calls fixed and how many they broke. For `vote` I also record whether any of the 5 queries was right, which shows how much a better way of choosing could still gain.
 
 I compare variants question by question with `sql-agent compare` and McNemar's exact test, because a small change in overall accuracy can hide many questions that flipped in both directions.
-
-Coming next: majority voting over several candidate queries.
 
 ## Project layout
 

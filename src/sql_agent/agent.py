@@ -25,6 +25,8 @@ class AgentResult:
     sql: str
     execution: ExecutionResult
     first_execution: ExecutionResult | None = None
+    candidate_executions: list[ExecutionResult] = field(default_factory=list)
+    note: str = ""
     llm_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -90,6 +92,23 @@ def choose_final(attempts: list[tuple[str, ExecutionResult, str | None]]) -> tup
     return sql, execution
 
 
+def result_signature(execution: ExecutionResult) -> frozenset:
+    return frozenset(execution.rows)
+
+
+def pick_by_vote(candidates: list[tuple[str, ExecutionResult]]) -> tuple[int, int]:
+    runnable = [index for index, (_, execution) in enumerate(candidates) if execution.ok]
+    if not runnable:
+        return 0, 0
+    non_empty = [index for index in runnable if candidates[index][1].rows]
+    pool = non_empty or runnable
+    groups: dict[frozenset, list[int]] = {}
+    for index in pool:
+        groups.setdefault(result_signature(candidates[index][1]), []).append(index)
+    winning_group = max(groups.values(), key=lambda members: (len(members), -members[0]))
+    return winning_group[0], len(winning_group)
+
+
 def build_user_prompt(schema_text: str, question: str, evidence: str, extra_sections: list[str] | None = None) -> str:
     parts = [f"Database schema:\n{schema_text}"]
     parts.extend(section for section in (extra_sections or []) if section)
@@ -109,6 +128,8 @@ class BaselineAgent:
         use_descriptions: bool = False,
         use_value_matching: bool = False,
         max_corrections: int = 0,
+        candidates: int = 1,
+        sampling_temperature: float = 0.7,
         timeout_seconds: float = 30.0,
     ):
         self.model = model
@@ -116,6 +137,8 @@ class BaselineAgent:
         self.use_descriptions = use_descriptions
         self.use_value_matching = use_value_matching
         self.max_corrections = max_corrections
+        self.candidates = candidates
+        self.sampling_temperature = sampling_temperature
         self.timeout_seconds = timeout_seconds
 
     def build_prompt(self, db_path: Path, question: str, evidence: str) -> str:
@@ -130,6 +153,8 @@ class BaselineAgent:
         return build_user_prompt(schema_text, question, evidence, extra_sections)
 
     def answer(self, db_path: Path, question: str, evidence: str = "") -> AgentResult:
+        if self.candidates > 1:
+            return self.answer_by_vote(db_path, question, evidence)
         original_prompt = self.build_prompt(db_path, question, evidence)
         prompt = original_prompt
         attempts: list[tuple[str, ExecutionResult, str | None]] = []
@@ -152,15 +177,50 @@ class BaselineAgent:
                 break
             prompt = build_correction_prompt(original_prompt, sql, problem, execution)
         final_sql, final_execution = choose_final(attempts)
+        retries = totals["calls"] - 1
         return AgentResult(
             sql=final_sql,
             execution=final_execution,
             first_execution=attempts[0][1],
+            candidate_executions=[execution for _, execution, _ in attempts],
             llm_calls=totals["calls"],
             input_tokens=totals["input"],
             output_tokens=totals["output"],
             llm_seconds=totals["seconds"],
             attempts=log,
+            note=f"(+{retries} retry)" if retries else "",
+        )
+
+    def answer_by_vote(self, db_path: Path, question: str, evidence: str) -> AgentResult:
+        prompt = self.build_prompt(db_path, question, evidence)
+        candidates: list[tuple[str, ExecutionResult]] = []
+        log: list[dict] = []
+        totals = {"input": 0, "output": 0, "seconds": 0.0}
+        for index in range(self.candidates):
+            temperature = 0.0 if index == 0 else self.sampling_temperature
+            completion = self.model.complete(SYSTEM_PROMPT, prompt, temperature=temperature)
+            totals["input"] += completion.input_tokens
+            totals["output"] += completion.output_tokens
+            totals["seconds"] += completion.seconds
+            sql = extract_sql(completion.text)
+            execution = execute_sql(db_path, sql, self.timeout_seconds)
+            candidates.append((sql, execution))
+            log.append({"raw_response": completion.text, "sql": sql, "temperature": temperature,
+                        "error": execution.error, "rows": len(execution.rows)})
+        winner, votes = pick_by_vote(candidates)
+        for index, entry in enumerate(log):
+            entry["chosen"] = index == winner
+        return AgentResult(
+            sql=candidates[winner][0],
+            execution=candidates[winner][1],
+            first_execution=candidates[0][1],
+            candidate_executions=[execution for _, execution in candidates],
+            llm_calls=self.candidates,
+            input_tokens=totals["input"],
+            output_tokens=totals["output"],
+            llm_seconds=totals["seconds"],
+            attempts=log,
+            note=f"({votes}/{self.candidates} agree)",
         )
 
 
@@ -171,6 +231,7 @@ VARIANTS = {
     "value_match": {"use_value_matching": True},
     "descriptions_value_match": {"use_descriptions": True, "use_value_matching": True},
     "self_correct": {"use_descriptions": True, "max_corrections": 2},
+    "vote": {"use_descriptions": True, "candidates": 5},
 }
 
 

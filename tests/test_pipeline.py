@@ -18,7 +18,7 @@ class ScriptedModel:
     def __init__(self, answers: list[str]):
         self.answers = list(answers)
 
-    def complete(self, system_prompt: str, user_prompt: str) -> Completion:
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
         return Completion(text=self.answers.pop(0), input_tokens=100, output_tokens=20, seconds=0.01)
 
 
@@ -225,9 +225,9 @@ class RecordingModel(ScriptedModel):
         super().__init__(answers)
         self.prompts: list[str] = []
 
-    def complete(self, system_prompt: str, user_prompt: str) -> Completion:
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
         self.prompts.append(user_prompt)
-        return super().complete(system_prompt, user_prompt)
+        return super().complete(system_prompt, user_prompt, temperature)
 
 
 def school_db(data_root: Path) -> Path:
@@ -283,8 +283,9 @@ def test_retry_metrics_in_summary(data_root: Path, tmp_path: Path):
     summary = summarize(output_path)
     assert summary["execution_accuracy"] == 1.0
     assert summary["questions_retried"] == 1
-    assert summary["fixed_by_retry"] == 1
-    assert summary["broken_by_retry"] == 0
+    assert summary["fixed_after_first_attempt"] == 1
+    assert summary["broken_after_first_attempt"] == 0
+    assert summary["first_attempt_accuracy"] == 0.5
 
 
 def test_daily_quota_is_not_retried():
@@ -305,3 +306,85 @@ def test_same_id_and_text_with_different_sql_are_separate(data_root: Path, tmp_p
     model = ScriptedModel(["SELECT COUNT(*) FROM students", "SELECT MAX(grade) FROM students"])
     run_evaluation(BaselineAgent(model), examples, databases_dir, output_path, progress=lambda message: None)
     assert summarize(output_path)["questions"] == 2
+
+
+class TemperatureRecordingModel(ScriptedModel):
+    def __init__(self, answers: list[str]):
+        super().__init__(answers)
+        self.temperatures: list[float] = []
+
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
+        self.temperatures.append(temperature)
+        return super().complete(system_prompt, user_prompt, temperature)
+
+
+def test_vote_picks_the_majority_result(data_root: Path):
+    model = TemperatureRecordingModel([
+        "SELECT 5",
+        "SELECT COUNT(*) FROM students",
+        "SELECT COUNT(id) FROM students",
+        "SELECT COUNT(name) FROM students",
+        "SELECT 5",
+    ])
+    result = BaselineAgent(model, candidates=5).answer(school_db(data_root), "How many students?")
+    assert result.execution.rows == [(3,)]
+    assert result.sql == "SELECT COUNT(*) FROM students"
+    assert result.note == "(3/5 agree)"
+    assert result.llm_calls == 5
+    assert model.temperatures == [0.0, 0.7, 0.7, 0.7, 0.7]
+    assert result.first_execution.rows == [(5,)]
+
+
+def test_vote_ignores_errors_and_prefers_non_empty_results(data_root: Path):
+    model = ScriptedModel([
+        "SELECT nope FROM students",
+        "SELECT name FROM students WHERE grade > 100",
+        "SELECT name FROM students WHERE grade > 100",
+        "SELECT name FROM students WHERE grade > 85",
+        "SELECT broken FROM",
+    ])
+    result = BaselineAgent(model, candidates=5).answer(school_db(data_root), "Who got over 85?")
+    assert result.execution.rows == [("Asha",)]
+
+
+def test_vote_ties_go_to_the_earliest_candidate_and_ignore_row_order(data_root: Path):
+    model = ScriptedModel([
+        "SELECT name FROM students ORDER BY name",
+        "SELECT name FROM students ORDER BY name DESC",
+        "SELECT 1",
+        "SELECT 1",
+        "SELECT name FROM students WHERE id = 1",
+    ])
+    result = BaselineAgent(model, candidates=5).answer(school_db(data_root), "List students")
+    assert result.sql == "SELECT name FROM students ORDER BY name"
+    assert result.note == "(2/5 agree)"
+
+
+def test_vote_with_only_errors_falls_back_to_the_first_candidate(data_root: Path):
+    model = ScriptedModel(["SELECT a FROM", "SELECT b FROM", "SELECT c FROM"])
+    result = BaselineAgent(model, candidates=3).answer(school_db(data_root), "Anything")
+    assert result.sql == "SELECT a FROM"
+    assert result.execution.error
+
+
+def test_vote_metrics_in_summary(data_root: Path, tmp_path: Path):
+    examples = load_examples(data_root)[:1]
+    model = ScriptedModel(["SELECT 7", "SELECT COUNT(*) FROM students", "SELECT COUNT(*) FROM students", "SELECT 9", "SELECT 10"])
+    output_path = tmp_path / "vote.jsonl"
+    run_evaluation(BaselineAgent(model, candidates=5), examples, data_root / "MINIDEV" / "dev_databases", output_path, progress=lambda message: None)
+    summary = summarize(output_path)
+    assert summary["execution_accuracy"] == 1.0
+    assert summary["first_attempt_accuracy"] == 0.0
+    assert summary["fixed_after_first_attempt"] == 1
+    assert summary["any_candidate_correct"] == 1.0
+    assert summary["avg_llm_calls"] == 5
+
+
+def test_any_candidate_correct_counts_losing_candidates(data_root: Path, tmp_path: Path):
+    examples = load_examples(data_root)[:1]
+    model = ScriptedModel(["SELECT 7", "SELECT 7", "SELECT COUNT(*) FROM students"])
+    output_path = tmp_path / "vote_lost.jsonl"
+    run_evaluation(BaselineAgent(model, candidates=3), examples, data_root / "MINIDEV" / "dev_databases", output_path, progress=lambda message: None)
+    summary = summarize(output_path)
+    assert summary["execution_accuracy"] == 0.0
+    assert summary["any_candidate_correct"] == 1.0

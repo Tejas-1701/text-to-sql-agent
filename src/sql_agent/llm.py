@@ -18,7 +18,7 @@ class Completion:
 class LanguageModel(Protocol):
     name: str
 
-    def complete(self, system_prompt: str, user_prompt: str) -> Completion: ...
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion: ...
 
 
 class RateLimiter:
@@ -73,10 +73,10 @@ class GeminiModel:
         self.types = types
         self.limiter = RateLimiter(requests_per_minute)
 
-    def complete(self, system_prompt: str, user_prompt: str) -> Completion:
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
         config = self.types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=0.0,
+            temperature=temperature,
             automatic_function_calling=self.types.AutomaticFunctionCallingConfig(disable=True),
         )
 
@@ -101,11 +101,11 @@ class OllamaModel:
         self.host = (host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
         self.client = httpx.Client(timeout=300.0)
 
-    def complete(self, system_prompt: str, user_prompt: str) -> Completion:
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
         payload = {
             "model": self.name,
             "stream": False,
-            "options": {"temperature": 0.0},
+            "options": {"temperature": temperature},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
