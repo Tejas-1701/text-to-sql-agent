@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -48,15 +49,46 @@ def is_retryable(error: Exception) -> bool:
     return any(marker in text for marker in markers)
 
 
-def with_retries(call, attempts: int = 6, first_delay: float = 5.0):
+def is_overloaded(error: Exception) -> bool:
+    text = f"{type(error).__name__} {error}".lower()
+    return any(marker in text for marker in ("503", "unavailable", "overloaded", "high demand"))
+
+
+def short_reason(error: Exception) -> str:
+    first_line = str(error).splitlines()[0] if str(error) else type(error).__name__
+    return first_line.split(". ")[0][:80]
+
+
+def log_to_stderr(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def with_retries(
+    call,
+    attempts: int = 6,
+    first_delay: float = 5.0,
+    overload_wait_seconds: float = 900.0,
+    sleep=time.sleep,
+    log=log_to_stderr,
+):
     delay = first_delay
-    for attempt in range(attempts):
+    waited = 0.0
+    failures = 0
+    while True:
         try:
             return call()
         except Exception as error:
-            if attempt == attempts - 1 or not is_retryable(error):
+            failures += 1
+            if not is_retryable(error):
                 raise
-            time.sleep(delay)
+            if is_overloaded(error):
+                if waited + delay > overload_wait_seconds:
+                    raise
+            elif failures >= attempts:
+                raise
+            log(f"      {short_reason(error)}; retrying in {delay:.0f}s (waited {waited:.0f}s so far)")
+            sleep(delay)
+            waited += delay
             delay = min(delay * 2, 120.0)
 
 

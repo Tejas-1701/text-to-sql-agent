@@ -463,3 +463,47 @@ def test_other_variants_keep_the_plain_system_prompt():
 
     for variant in ("baseline", "descriptions", "self_correct", "vote"):
         assert build_agent(variant, ScriptedModel([])).system_prompt == SYSTEM_PROMPT
+
+
+def test_overload_errors_get_a_longer_visible_wait():
+    from sql_agent.llm import with_retries
+
+    naps: list[float] = []
+    messages: list[str] = []
+
+    def always_overloaded():
+        raise RuntimeError("503 UNAVAILABLE. {'message': 'This model is currently experiencing high demand.'}")
+
+    with pytest.raises(RuntimeError):
+        with_retries(always_overloaded, sleep=naps.append, log=messages.append)
+    assert sum(naps) <= 900
+    assert sum(naps) > 600
+    assert len(naps) > 6
+    assert messages[0].strip().startswith("503 UNAVAILABLE; retrying in 5s")
+
+
+def test_rate_limits_still_stop_after_six_attempts():
+    from sql_agent.llm import with_retries
+
+    naps: list[float] = []
+
+    def always_rate_limited():
+        raise RuntimeError("429 RESOURCE_EXHAUSTED per minute")
+
+    with pytest.raises(RuntimeError):
+        with_retries(always_rate_limited, sleep=naps.append, log=lambda message: None)
+    assert len(naps) == 5
+
+
+def test_overload_recovers_when_the_model_comes_back():
+    from sql_agent.llm import with_retries
+
+    calls = []
+
+    def recovers():
+        calls.append(1)
+        if len(calls) < 4:
+            raise RuntimeError("503 UNAVAILABLE")
+        return "answer"
+
+    assert with_retries(recovers, sleep=lambda seconds: None, log=lambda message: None) == "answer"
