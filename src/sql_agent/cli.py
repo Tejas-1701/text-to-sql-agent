@@ -69,8 +69,8 @@ def preview_command(arguments) -> None:
     agent = build_agent(arguments.variant, NoModel())
     db_path = database_path(find_databases_dir(data_root), example.db_id)
     prompt = agent.build_prompt(db_path, example.question, example.evidence)
-    print(prompt)
-    print(f"\n--- {len(prompt)} characters, about {len(prompt) // 4} tokens ---")
+    print(f"System prompt:\n{agent.system_prompt}\n\n{prompt}")
+    print(f"\n--- {len(agent.system_prompt) + len(prompt)} characters, about {(len(agent.system_prompt) + len(prompt)) // 4} tokens ---")
 
 
 def main() -> None:

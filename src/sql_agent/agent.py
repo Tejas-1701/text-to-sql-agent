@@ -13,6 +13,16 @@ SYSTEM_PROMPT = (
 )
 
 
+HINT_RULES = """
+Rules:
+1. Treat the hint as the definition. Use the exact tables, columns, values, LIKE patterns and formulas it gives. If it writes a formula such as SUM(a) / COUNT(b), use that formula instead of AVG or another shortcut.
+2. When the question or hint asks for a percentage, multiply by 100. Use CAST(... AS REAL) before dividing.
+3. Text values are case-sensitive. Copy values exactly as stored. If a value appears under "Values from the question found in the database", use that exact spelling.
+4. Return only the columns the question asks for, in the order it asks. Do not use SELECT * and do not add helper columns such as ids, counts or computed values that were not requested.
+5. Do not add conditions, functions (such as ABS) or filters that neither the question nor the hint asks for.
+""".strip()
+
+
 CORRECTION_INSTRUCTIONS = (
     "Your previous query may be wrong. Read the problem below, then write a corrected SQLite query. "
     "If you are confident the previous query already answers the question, return it unchanged. "
@@ -130,6 +140,7 @@ class BaselineAgent:
         max_corrections: int = 0,
         candidates: int = 1,
         sampling_temperature: float = 0.7,
+        use_rules: bool = False,
         timeout_seconds: float = 30.0,
     ):
         self.model = model
@@ -139,6 +150,7 @@ class BaselineAgent:
         self.max_corrections = max_corrections
         self.candidates = candidates
         self.sampling_temperature = sampling_temperature
+        self.system_prompt = f"{SYSTEM_PROMPT}\n\n{HINT_RULES}" if use_rules else SYSTEM_PROMPT
         self.timeout_seconds = timeout_seconds
 
     def build_prompt(self, db_path: Path, question: str, evidence: str) -> str:
@@ -161,7 +173,7 @@ class BaselineAgent:
         log: list[dict] = []
         totals = {"calls": 0, "input": 0, "output": 0, "seconds": 0.0}
         for attempt_number in range(self.max_corrections + 1):
-            completion = self.model.complete(SYSTEM_PROMPT, prompt)
+            completion = self.model.complete(self.system_prompt, prompt)
             totals["calls"] += 1
             totals["input"] += completion.input_tokens
             totals["output"] += completion.output_tokens
@@ -198,7 +210,7 @@ class BaselineAgent:
         totals = {"input": 0, "output": 0, "seconds": 0.0}
         for index in range(self.candidates):
             temperature = 0.0 if index == 0 else self.sampling_temperature
-            completion = self.model.complete(SYSTEM_PROMPT, prompt, temperature=temperature)
+            completion = self.model.complete(self.system_prompt, prompt, temperature=temperature)
             totals["input"] += completion.input_tokens
             totals["output"] += completion.output_tokens
             totals["seconds"] += completion.seconds
@@ -232,6 +244,7 @@ VARIANTS = {
     "descriptions_value_match": {"use_descriptions": True, "use_value_matching": True},
     "self_correct": {"use_descriptions": True, "max_corrections": 2},
     "vote": {"use_descriptions": True, "candidates": 5},
+    "hint_rules": {"use_rules": True, "use_value_matching": True},
 }
 
 

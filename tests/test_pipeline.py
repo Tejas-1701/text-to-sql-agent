@@ -433,3 +433,33 @@ def test_auto_flag_shapes(data_root: Path):
     assert auto_flag(run("SELECT name FROM students"), run("SELECT name, grade FROM students")) == "missing columns"
     assert auto_flag(run("SELECT name FROM students"), run("SELECT name FROM students WHERE id = 1")) == "too many rows"
     assert auto_flag(run("SELECT name FROM students WHERE id = 2"), run("SELECT name FROM students WHERE id = 1")) == "same shape, different values"
+
+
+class SystemPromptRecordingModel(ScriptedModel):
+    def __init__(self, answers: list[str]):
+        super().__init__(answers)
+        self.system_prompts: list[str] = []
+
+    def complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Completion:
+        self.system_prompts.append(system_prompt)
+        return super().complete(system_prompt, user_prompt, temperature)
+
+
+def test_hint_rules_variant_adds_rules_and_value_matching(data_root: Path):
+    from sql_agent.agent import HINT_RULES, SYSTEM_PROMPT, build_agent
+
+    model = SystemPromptRecordingModel(["SELECT grade FROM students WHERE name = 'Chen'"])
+    agent = build_agent("hint_rules", model)
+    prompt = agent.build_prompt(school_db(data_root), "What grade did chen get?", "")
+    assert "'Chen'" in prompt
+    result = agent.answer(school_db(data_root), "What grade did chen get?")
+    assert result.execution.rows == [(82,)]
+    assert model.system_prompts == [f"{SYSTEM_PROMPT}\n\n{HINT_RULES}"]
+    assert "multiply by 100" in HINT_RULES
+
+
+def test_other_variants_keep_the_plain_system_prompt():
+    from sql_agent.agent import SYSTEM_PROMPT, build_agent
+
+    for variant in ("baseline", "descriptions", "self_correct", "vote"):
+        assert build_agent(variant, ScriptedModel([])).system_prompt == SYSTEM_PROMPT
