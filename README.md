@@ -14,17 +14,20 @@ Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash
 | + values matched from the question | 59.0% | 1.0% | 1,114 | 7.4s | 9 / 7 | 0.80 |
 | + descriptions and matched values | 58.5% | 1.5% | 2,478 | 8.1s | 9 / 8 | 1.00 |
 | + descriptions and self-correction | 58.5% | 0.0% | 2,861 | 6.9s | 12 / 11 | 1.00 |
-| + descriptions and 5-way voting | | | | | | |
+| + descriptions and 5-way voting | 57.5% | 0.0% | 12,206 | 34.1s | 7 / 8 | 1.00 |
 
 **Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice with the same wording and reference SQL).
 
 ### What I learned
+
+In short: none of the common tricks I tried beat the plain baseline by a statistically reliable margin on this model. The model's remaining mistakes are consistent misreadings of the question or the data, not random slips.
 
 - **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs.
 - **Column descriptions may help, but I can't prove it.** They fixed 13 questions and broke 7 (p = 0.26). The self-correction run uses the same first prompt and its first attempts scored about 58%, so the 61% descriptions run was probably partly luck.
 - **Random sample values and value matching did not help.** BIRD's hints already spell out most of the values a question needs, so finding them in the database adds little.
 - **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute.
 - **Self-correction removes crashes but barely changes accuracy.** 24 of 200 questions triggered a retry (an error, no rows, only NULLs, or too many rows). The retries fixed 2 answers and broke 1, and took crashed queries from 1 to 3 per run down to 0. It costs 1.15 model calls per question on average. The wrong answers that remain run fine and return rows that look reasonable, so simple result checks can't spot them.
+- **Voting doesn't help because the model is confidently wrong.** Voting over 5 queries scored 57.5%, against 57.0% for its own temperature-0 answer (3 fixed, 2 broken), at 5 times the cost and 34 seconds per question. Most questions got 5 out of 5 identical results, including the wrong ones. Even a perfect way of choosing among the 5 queries would only reach 62.5%. The errors are systematic, not random, so sampling more answers can't fix them.
 
 ## Setup
 
@@ -59,6 +62,7 @@ sql-agent run --provider ollama --model qwen2.5-coder:7b --rpm 0
 sql-agent summary                             # prints the results table
 sql-agent compare results\A.jsonl results\B.jsonl   # fixed/broken counts and p-value
 sql-agent preview 1471 --variant descriptions_value_match   # show a prompt, no API call
+sql-agent errors results\baseline__gemini-3.5-flash-lite__n200.jsonl results\vote__gemini-3.5-flash-lite__n200.jsonl   # questions every run got wrong
 ```
 
 Each run writes one line per question to `results/`. If a run stops because of rate limits, running the same command again picks up where it left off.
@@ -97,6 +101,7 @@ src/sql_agent/
   llm.py        Gemini and Ollama clients with rate limiting and retries
   agent.py      agent variants
   evaluate.py   evaluation loop, metrics, results table
+  errors.py     export always-wrong questions with automatic flags
   cli.py        command-line entry point
 tests/          tests on a small stand-in database, no API calls
 ```

@@ -388,3 +388,48 @@ def test_any_candidate_correct_counts_losing_candidates(data_root: Path, tmp_pat
     summary = summarize(output_path)
     assert summary["execution_accuracy"] == 0.0
     assert summary["any_candidate_correct"] == 1.0
+
+
+def write_run(path: Path, rows: list[tuple[int, str, str, str, bool]]) -> None:
+    lines = [
+        json.dumps({"question_id": qid, "db_id": "school", "difficulty": "simple", "question": question,
+                    "predicted_sql": predicted, "gold_sql": gold, "correct": correct})
+        for qid, question, predicted, gold, correct in rows
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_error_export_flags_and_filters(data_root: Path, tmp_path: Path):
+    import csv as csv_module
+    from sql_agent.errors import export_errors
+
+    extra = (1, "Who scored above 80?", "SELECT name, grade FROM students WHERE grade > 80", "SELECT name FROM students WHERE grade > 80")
+    crash = (2, "Top student?", "SELECT nope FROM students", "SELECT name FROM students ORDER BY grade DESC LIMIT 1")
+    close = (3, "Average grade?", "SELECT 82.4", "SELECT AVG(grade) FROM students")
+    fixed_later = (0, "How many students?", "SELECT 9", "SELECT COUNT(*) FROM students")
+    write_run(tmp_path / "a.jsonl", [(*extra, False), (*crash, False), (*close, False), (*fixed_later, False)])
+    write_run(tmp_path / "b.jsonl", [(*extra, False), (*crash, False), (*close, False), (*fixed_later, True)])
+    output_path = tmp_path / "analysis" / "errors.csv"
+    flags = export_errors([tmp_path / "a.jsonl", tmp_path / "b.jsonl"], data_root,
+                          data_root / "MINIDEV" / "dev_databases", output_path, sample_size=2)
+    assert flags == {"right answer plus extra columns": 1, "crashed": 1, "number off by under 1%": 1}
+    with output_path.open(encoding="utf-8-sig") as handle:
+        rows = list(csv_module.DictReader(handle))
+    assert len(rows) == 3
+    assert sum(row["in_sample"] == "yes" for row in rows) == 2
+    extra_row = next(row for row in rows if row["question_id"] == "1")
+    assert extra_row["hint"] == "above 80 means grade > 80"
+    assert extra_row["predicted_columns"] == "name, grade"
+    assert extra_row["gold_columns"] == "name"
+
+
+def test_auto_flag_shapes(data_root: Path):
+    from sql_agent.errors import auto_flag
+
+    db = school_db(data_root)
+    run = lambda sql: execute_sql(db, sql)
+    assert auto_flag(run("SELECT name FROM students WHERE grade > 100"), run("SELECT name FROM students")) == "empty result"
+    assert auto_flag(run("SELECT name, id FROM students WHERE id = 1"), run("SELECT grade FROM students WHERE id = 2")) == "extra columns"
+    assert auto_flag(run("SELECT name FROM students"), run("SELECT name, grade FROM students")) == "missing columns"
+    assert auto_flag(run("SELECT name FROM students"), run("SELECT name FROM students WHERE id = 1")) == "too many rows"
+    assert auto_flag(run("SELECT name FROM students WHERE id = 2"), run("SELECT name FROM students WHERE id = 1")) == "same shape, different values"

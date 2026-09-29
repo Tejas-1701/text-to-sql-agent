@@ -7,6 +7,7 @@ from pathlib import Path
 @dataclass
 class ExecutionResult:
     rows: list[tuple] = field(default_factory=list)
+    columns: list[str] = field(default_factory=list)
     error: str | None = None
     timed_out: bool = False
     seconds: float = 0.0
@@ -25,7 +26,8 @@ def execute_sql(db_path: Path, sql: str, timeout_seconds: float = 30.0, max_rows
     try:
         cursor = connection.execute(sql)
         rows = cursor.fetchmany(max_rows)
-        return ExecutionResult(rows=rows, seconds=time.perf_counter() - started)
+        columns = [description[0] for description in cursor.description or []]
+        return ExecutionResult(rows=rows, columns=columns, seconds=time.perf_counter() - started)
     except sqlite3.OperationalError as error:
         timed_out = "interrupted" in str(error).lower()
         message = f"query exceeded {timeout_seconds:.0f}s timeout" if timed_out else str(error)

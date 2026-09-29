@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from .agent import VARIANTS, build_agent
 from .dataset import database_path, find_databases_dir, fixed_subset, load_examples
+from .errors import export_errors
 from .evaluate import compare_runs, markdown_table, run_evaluation, summarize
 from .llm import build_model
 
@@ -37,6 +38,22 @@ def compare_command(arguments) -> None:
     print(f"fixed: {result['fixed_by_second']}  broken: {result['broken_by_second']}  "
           f"both correct: {result['both_correct']}  both wrong: {result['both_wrong']}")
     print(f"McNemar exact p = {result['mcnemar_p']:.3f}")
+
+
+def errors_command(arguments) -> None:
+    data_root = Path(arguments.data)
+    output_path = Path(arguments.out)
+    flags = export_errors(
+        [Path(path) for path in arguments.runs],
+        data_root,
+        find_databases_dir(data_root),
+        output_path,
+        arguments.sample,
+    )
+    total = sum(flags.values())
+    print(f"{total} questions were wrong in every run -> {output_path}")
+    for flag, count in flags.most_common():
+        print(f"  {count:>3}  {flag}")
 
 
 def preview_command(arguments) -> None:
@@ -85,6 +102,13 @@ def main() -> None:
     compare_parser.add_argument("first")
     compare_parser.add_argument("second")
     compare_parser.set_defaults(handler=compare_command)
+
+    errors_parser = commands.add_parser("errors", help="Export questions that every given run got wrong, for labeling")
+    errors_parser.add_argument("runs", nargs="+")
+    errors_parser.add_argument("--data", default="data")
+    errors_parser.add_argument("--out", default="analysis/errors.csv")
+    errors_parser.add_argument("--sample", type=int, default=30)
+    errors_parser.set_defaults(handler=errors_command)
 
     preview_parser = commands.add_parser("preview", help="Print the prompt for one question without calling the model")
     preview_parser.add_argument("question_id", type=int)
