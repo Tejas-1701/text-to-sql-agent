@@ -15,7 +15,7 @@ Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash
 | + descriptions and matched values | 58.5% | 1.5% | 2,478 | 8.1s | 9 / 8 | 1.00 |
 | + descriptions and self-correction | 58.5% | 0.0% | 2,861 | 6.9s | 12 / 11 | 1.00 |
 | + descriptions and 5-way voting | 57.5% | 0.0% | 12,206 | 34.1s | 7 / 8 | 1.00 |
-| + hint rules and matched values | | | | | | |
+| + hint rules and matched values | 58.0% | 1.5% | 1,302 | 6.4s | 15 / 15 | 1.00 |
 
 **Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice with the same wording and reference SQL).
 
@@ -29,6 +29,7 @@ In short: none of the common tricks I tried beat the plain baseline by a statist
 - **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute.
 - **Self-correction removes crashes but barely changes accuracy.** 24 of 200 questions triggered a retry (an error, no rows, only NULLs, or too many rows). The retries fixed 2 answers and broke 1, and took crashed queries from 1 to 3 per run down to 0. It costs 1.15 model calls per question on average. The wrong answers that remain run fine and return rows that look reasonable, so simple result checks can't spot them.
 - **Voting doesn't help because the model is confidently wrong.** Voting over 5 queries scored 57.5%, against 57.0% for its own temperature-0 answer (3 fixed, 2 broken), at 5 times the cost and 34 seconds per question. Most questions got 5 out of 5 identical results, including the wrong ones. Even a perfect way of choosing among the 5 queries would only reach 62.5%. The errors are systematic, not random, so sampling more answers can't fix them.
+- **Rules written from the error analysis moved answers around without improving them.** The `hint_rules` variant changed the outcome of 30 questions, the most of any variant, but fixed 15 and broke 15. Simple questions improved from 66% to 71%, while challenging ones fell from 56% to 41%. Rules such as "return only the requested columns" and "don't add conditions" seem to help short queries and hurt long ones. This is also why I don't trust a fix just because it solves the examples it was written for.
 
 ## Error analysis
 
@@ -47,7 +48,7 @@ In short: none of the common tricks I tried beat the plain baseline by a statist
 
 - **About a quarter of the "errors" are benchmark problems.** In 8 of 30, the reference SQL contradicts its own hint, uses a date format that isn't in the data, expects exact wording such as 'well-finished', or differs only in the last digits of a float. In one case my answer named the actual race winner and the reference did not.
 - **The biggest fixable group is the hint.** The model returned a fraction when the hint asked for a percentage, used AVG when the hint gave SUM/COUNT, or used a different column than the hint named. Two more errors were letter case ('discount' vs 'Discount').
-- This led to the `hint_rules` variant below.
+- This led to the `hint_rules` variant. It fixed some of these cases, including the letter-case one, but broke as many others (see the results table).
 
 ## Setup
 
