@@ -1,6 +1,6 @@
 # Self-Correcting Text-to-SQL Agent
 
-I'm building an agent that turns plain-English questions into SQL, runs the query, and fixes its own mistakes. I measure it on the [BIRD mini-dev](https://github.com/bird-bench/mini_dev) benchmark (500 questions over 11 real SQLite databases).
+I built an agent that turns plain-English questions into SQL, runs the query, and tries to fix its own mistakes. I measure it on the [BIRD mini-dev](https://github.com/bird-bench/mini_dev) benchmark (500 questions over 11 real SQLite databases).
 
 ## Results
 
@@ -17,11 +17,21 @@ Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash
 | + descriptions and 5-way voting | 57.5% | 0.0% | 12,206 | 34.1s | 7 / 8 | 1.00 |
 | + hint rules and matched values | 58.0% | 1.5% | 1,302 | 6.4s | 15 / 15 | 1.00 |
 
+### Model comparison
+
+Same 200 questions, same code. Qwen 2.5 Coder 7B runs locally through [Ollama](https://ollama.com) on a laptop GPU (GTX 1650), at no cost.
+
+| Model and variant | Exec. accuracy | Exec. errors | Input tokens/query | Latency | Fixed / broken | McNemar p |
+|---|---|---|---|---|---|---|
+| Gemini 3.5 Flash-Lite, baseline | 58.0% | 1.5% | 1,077 | 6.2s | | |
+| Qwen 2.5 Coder 7B, baseline | 47.5% | 13.0% | 950 | 8.4s | 17 / 37 vs Gemini | **0.009** |
+| Qwen 2.5 Coder 7B, descriptions and self-correction | 47.5% | 8.5% | 2,882 | 18.6s | 12 / 13 vs Qwen baseline | 1.00 |
+
 **Execution accuracy** means my query returns the same set of rows as the reference query. Paired comparisons use the 199 unique questions (one BIRD question appears twice with the same wording and reference SQL).
 
 ### What I learned
 
-In short: none of the common tricks I tried beat the plain baseline by a statistically reliable margin on this model. The model's remaining mistakes are consistent misreadings of the question or the data, not random slips.
+In short: none of the common tricks I tried beat the plain baseline by a statistically reliable margin. The only significant difference in the whole project came from changing the model. The remaining mistakes are consistent misreadings of the question or the data, not random slips.
 
 - **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs.
 - **Column descriptions may help, but I can't prove it.** They fixed 13 questions and broke 7 (p = 0.26). The self-correction run uses the same first prompt and its first attempts scored about 58%, so the 61% descriptions run was probably partly luck.
@@ -30,6 +40,8 @@ In short: none of the common tricks I tried beat the plain baseline by a statist
 - **Self-correction removes crashes but barely changes accuracy.** 24 of 200 questions triggered a retry (an error, no rows, only NULLs, or too many rows). The retries fixed 2 answers and broke 1, and took crashed queries from 1 to 3 per run down to 0. It costs 1.15 model calls per question on average. The wrong answers that remain run fine and return rows that look reasonable, so simple result checks can't spot them.
 - **Voting doesn't help because the model is confidently wrong.** Voting over 5 queries scored 57.5%, against 57.0% for its own temperature-0 answer (3 fixed, 2 broken), at 5 times the cost and 34 seconds per question. Most questions got 5 out of 5 identical results, including the wrong ones. Even a perfect way of choosing among the 5 queries would only reach 62.5%. The errors are systematic, not random, so sampling more answers can't fix them.
 - **Rules written from the error analysis moved answers around without improving them.** The `hint_rules` variant changed the outcome of 30 questions, the most of any variant, but fixed 15 and broke 15. Simple questions improved from 66% to 71%, while challenging ones fell from 56% to 41%. Rules such as "return only the requested columns" and "don't add conditions" seem to help short queries and hurt long ones. This is also why I don't trust a fix just because it solves the examples it was written for.
+- **The model matters more than any trick.** Gemini Flash-Lite beat the local Qwen 7B model by 10 points (37 questions won, 17 lost, p = 0.009), the only significant result here. Qwen crashed on 26 questions against Gemini's 3, mostly from invented column names, such as `Enrollment_K_12` for `` `Enrollment (K-12)` ``.
+- **Self-correction didn't rescue the small model either.** I expected a retry loop to help Qwen more, since it crashes 9 times as often. It retried 53 questions and cut crashes from 13% to 8.5%, but the retries fixed only 4 answers and broke 2. Given the error "no such column", the model usually guessed another wrong column instead of finding the right one.
 
 ## Error analysis
 
@@ -49,6 +61,12 @@ In short: none of the common tricks I tried beat the plain baseline by a statist
 - **About a quarter of the "errors" are benchmark problems.** In 8 of 30, the reference SQL contradicts its own hint, uses a date format that isn't in the data, expects exact wording such as 'well-finished', or differs only in the last digits of a float. In one case my answer named the actual race winner and the reference did not.
 - **The biggest fixable group is the hint.** The model returned a fraction when the hint asked for a percentage, used AVG when the hint gave SUM/COUNT, or used a different column than the hint named. Two more errors were letter case ('discount' vs 'Discount').
 - This led to the `hint_rules` variant. It fixed some of these cases, including the letter-case one, but broke as many others (see the results table).
+
+## Limitations
+
+- **One model family per tier.** I couldn't test a stronger model: on the free tier, Gemini 3.7 Flash allows 20 requests a day and 3.8 Flash was overloaded when I tried it.
+- **200 questions, mostly one run per variant.** With about 7% of answers changing between identical runs, only effects of roughly 10 points or more show up as significant. A real gain of 2 to 3 points would need the full 500 questions and repeated runs.
+- **Execution accuracy is strict.** A correct answer with an extra column, a different float rounding, or different wording in a text result counts as wrong, and some reference answers are themselves questionable (see the error analysis).
 
 ## Setup
 
