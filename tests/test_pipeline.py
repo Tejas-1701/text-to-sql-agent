@@ -507,3 +507,49 @@ def test_overload_recovers_when_the_model_comes_back():
         return "answer"
 
     assert with_retries(recovers, sleep=lambda seconds: None, log=lambda message: None) == "answer"
+
+
+def test_format_table_aligns_and_truncates():
+    from sql_agent.display import format_table
+
+    text = format_table(["name", "grade"], [("Asha", 90), ("Ben", 75), ("Chen", 82)], limit=2)
+    lines = text.splitlines()
+    assert lines[0].split() == ["name", "grade"]
+    assert lines[2].split() == ["Asha", "90"]
+    assert lines[-1] == "... 1 more rows"
+    assert format_table([], []) == "(no rows)"
+
+
+def test_executor_returns_column_names(data_root: Path):
+    result = execute_sql(school_db(data_root), "SELECT name AS student, grade FROM students LIMIT 1")
+    assert result.columns == ["student", "grade"]
+
+
+def test_wilson_interval_is_sensible():
+    from sql_agent.chart import wilson_interval
+
+    low, high = wilson_interval(116, 200)
+    assert 0.50 < low < 0.52 and 0.64 < high < 0.66
+    assert wilson_interval(0, 0) == (0.0, 0.0)
+
+
+def test_chart_uses_only_complete_runs(tmp_path: Path):
+    from sql_agent.chart import collect_points, draw_chart
+
+    def write(name: str, correct: int, total: int) -> None:
+        lines = [json.dumps({"question_id": index, "question": str(index), "correct": index < correct}) for index in range(total)]
+        (tmp_path / name).write_text("\n".join(lines) + "\n")
+
+    write("baseline__gemini-3.5-flash-lite__n200.jsonl", 116, 200)
+    write("vote__gemini-3.5-flash-lite__n200.jsonl", 115, 200)
+    write("baseline__qwen2.5-coder-7b__n200.jsonl", 95, 200)
+    write("baseline__gemini-3.5-flash-lite__n5.jsonl", 1, 5)
+    write("hint_rules__gemini-3.5-flash-lite__n200.jsonl", 40, 80)
+    points = collect_points(tmp_path)
+    assert [(point.model, point.variant) for point in points] == [
+        ("gemini-3.5-flash-lite", "baseline"),
+        ("gemini-3.5-flash-lite", "vote"),
+        ("qwen2.5-coder-7b", "baseline"),
+    ]
+    output = draw_chart(points, tmp_path / "chart.png")
+    assert output.exists() and output.stat().st_size > 10000

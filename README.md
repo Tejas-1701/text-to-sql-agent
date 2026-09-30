@@ -1,6 +1,23 @@
-# Self-Correcting Text-to-SQL Agent
+# What Actually Improves Text-to-SQL? Testing 7 Techniques with Proper Statistics
 
-I built an agent that turns plain-English questions into SQL, runs the query, and tries to fix its own mistakes. I measure it on the [BIRD mini-dev](https://github.com/bird-bench/mini_dev) benchmark (500 questions over 11 real SQLite databases).
+I built a text-to-SQL agent that turns plain-English questions into SQL, runs the query and shows the result. I then used it to test seven popular ways of making such agents more accurate: extra schema context, value matching, self-correction, voting and prompt rules. I measured each one on the [BIRD mini-dev](https://github.com/bird-bench/mini_dev) benchmark with question-by-question significance tests.
+
+![Accuracy of every variant with 95% confidence intervals](results/accuracy.png)
+
+**Key findings**
+
+- **None of the seven techniques beat the plain baseline reliably.** Every variant landed between 57% and 61%, inside the noise between identical runs.
+- **Changing the model was the only significant result.** Gemini 3.5 Flash-Lite beat a local Qwen 2.5 Coder 7B model by 10 points (p = 0.009).
+- **The model is confidently wrong, not randomly wrong.** Voting over 5 answers barely moved accuracy, because most questions got 5 identical answers, including the wrong ones.
+- **About a quarter of the "errors" are problems in the benchmark itself**, such as reference answers that contradict their own hints.
+
+**Try it**
+
+```bash
+sql-agent ask "How many schools are in Alameda county?" --db california_schools
+```
+
+It prints the generated SQL and the result table. By default it uses column descriptions and self-correction, with Gemini 3.5 Flash-Lite. Add `--provider ollama --model qwen2.5-coder:7b` to run it locally.
 
 ## Results
 
@@ -92,6 +109,7 @@ On Windows, download [minidev.zip](https://bird-bench.oss-cn-beijing.aliyuncs.co
 ## Usage
 
 ```bash
+sql-agent ask "How many schools are in Alameda county?" --db california_schools
 sql-agent run --limit 5                       # quick smoke test
 sql-agent run --variant baseline              # 200-question subset
 sql-agent run --variant descriptions
@@ -100,6 +118,7 @@ sql-agent run --variant vote                  # 5 calls per question
 sql-agent run --variant hint_rules
 sql-agent run --provider ollama --model qwen2.5-coder:7b --rpm 0
 sql-agent summary                             # prints the results table
+sql-agent chart                               # draws results/accuracy.png
 sql-agent compare results\A.jsonl results\B.jsonl   # fixed/broken counts and p-value
 sql-agent preview 1471 --variant descriptions_value_match   # show a prompt, no API call
 sql-agent errors results\baseline__gemini-3.5-flash-lite__n200.jsonl results\vote__gemini-3.5-flash-lite__n200.jsonl   # questions every run got wrong
@@ -143,6 +162,8 @@ src/sql_agent/
   agent.py      agent variants
   evaluate.py   evaluation loop, metrics, results table
   errors.py     export always-wrong questions with automatic flags
+  chart.py      accuracy chart with confidence intervals
+  display.py    result tables for the ask command
   cli.py        command-line entry point
 tests/          tests on a small stand-in database, no API calls
 ```

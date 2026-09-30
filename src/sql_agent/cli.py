@@ -5,7 +5,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .agent import VARIANTS, build_agent
+from .chart import collect_points, draw_chart
 from .dataset import database_path, find_databases_dir, fixed_subset, load_examples
+from .display import format_table
 from .errors import export_errors
 from .evaluate import compare_runs, markdown_table, run_evaluation, summarize
 from .llm import build_model
@@ -54,6 +56,29 @@ def errors_command(arguments) -> None:
     print(f"{total} questions were wrong in every run -> {output_path}")
     for flag, count in flags.most_common():
         print(f"  {count:>3}  {flag}")
+
+
+def ask_command(arguments) -> None:
+    databases_dir = find_databases_dir(Path(arguments.data))
+    db_path = database_path(databases_dir, arguments.db)
+    if not db_path.exists():
+        available = sorted(folder.name for folder in databases_dir.iterdir() if folder.is_dir())
+        raise SystemExit(f"Unknown database '{arguments.db}'. Choose one of: {', '.join(available)}")
+    model = build_model(arguments.provider, arguments.model, arguments.rpm)
+    agent = build_agent(arguments.variant, model)
+    result = agent.answer(db_path, arguments.question, arguments.hint)
+    print(f"SQL:\n{result.sql}\n")
+    if result.execution.error:
+        print(f"The query failed: {result.execution.error}")
+    else:
+        print(format_table(result.execution.columns, result.execution.rows))
+    print(f"\n{result.llm_calls} model call(s), {result.llm_seconds:.1f}s")
+
+
+def chart_command(arguments) -> None:
+    points = collect_points(Path(arguments.results), arguments.subset)
+    output_path = draw_chart(points, Path(arguments.out))
+    print(f"Charted {len(points)} runs -> {output_path}")
 
 
 def preview_command(arguments) -> None:
@@ -109,6 +134,23 @@ def main() -> None:
     errors_parser.add_argument("--out", default="analysis/errors.csv")
     errors_parser.add_argument("--sample", type=int, default=30)
     errors_parser.set_defaults(handler=errors_command)
+
+    ask_parser = commands.add_parser("ask", help="Ask one question about a database and print the SQL and result")
+    ask_parser.add_argument("question")
+    ask_parser.add_argument("--db", required=True)
+    ask_parser.add_argument("--hint", default="")
+    ask_parser.add_argument("--variant", choices=list(VARIANTS), default="self_correct")
+    ask_parser.add_argument("--data", default="data")
+    ask_parser.add_argument("--provider", choices=["gemini", "ollama"], default="gemini")
+    ask_parser.add_argument("--model", default="gemini-3.5-flash-lite")
+    ask_parser.add_argument("--rpm", type=float, default=10.0)
+    ask_parser.set_defaults(handler=ask_command)
+
+    chart_parser = commands.add_parser("chart", help="Draw accuracy with confidence intervals for all complete runs")
+    chart_parser.add_argument("--results", default="results")
+    chart_parser.add_argument("--subset", type=int, default=200)
+    chart_parser.add_argument("--out", default="results/accuracy.png")
+    chart_parser.set_defaults(handler=chart_command)
 
     preview_parser = commands.add_parser("preview", help="Print the prompt for one question without calling the model")
     preview_parser.add_argument("question_id", type=int)
