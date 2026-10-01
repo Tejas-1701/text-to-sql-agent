@@ -1,12 +1,13 @@
 # What Actually Improves Text-to-SQL? Testing 7 Variants with Proper Statistics
 
-I built a text-to-SQL agent that turns plain-English questions into SQL, runs the query and shows the result. I then used it to test seven variants of common accuracy techniques: extra schema context, value matching, self-correction, voting and prompt rules. I measured each one on a fixed 200-question subset of [BIRD mini-dev](https://github.com/bird-bench/mini_dev), with question-by-question significance tests.
+I built a text-to-SQL agent that turns plain-English questions into SQL, runs the query and shows the result. I then used it to test seven variants of common accuracy techniques: extra schema context, value matching, self-correction, voting and prompt rules. I measured each one on a fixed 200-question subset of [BIRD mini-dev](https://github.com/bird-bench/mini_dev), with question-by-question significance tests. I then reran the most promising variant on all 500 questions, three times, to check whether its gain was real.
 
 ![Accuracy of every variant with 95% confidence intervals](results/accuracy.png)
 
 **Key findings**
 
 - **None of the seven variants beat the plain baseline reliably.** Every variant landed between 57% and 61%, inside the noise between identical runs.
+- **The one promising result disappeared with more data.** Column descriptions scored 61% against 58% on 200 questions. On all 500 questions, three runs each, both averaged about 59%.
 - **Changing the model was the only significant result.** Gemini 3.5 Flash-Lite beat a local Qwen 2.5 Coder 7B model by 10.5 points (p = 0.009).
 - **The model is confidently wrong, not randomly wrong.** Voting over 5 answers barely moved accuracy, because most questions got 5 identical answers, including the wrong ones.
 - **About a quarter of the "errors" are problems in the benchmark itself**, such as reference answers that contradict their own hints.
@@ -34,6 +35,19 @@ Fixed 200-question subset, stratified by difficulty (seed 42), `gemini-3.5-flash
 | + descriptions and 5-way voting | 57.5% | 0.0% | 12,206 | 34.1s | 7 / 8 | 1.00 |
 | + hint rules and matched values | 58.0% | 1.5% | 1,302 | 6.4s | 15 / 15 | 1.00 |
 
+### Checking the best variant on all 500 questions
+
+Column descriptions were the only variant that looked like a gain, so I reran them and the baseline on all 500 questions, three times each, on the paid tier. The six runs cost about $2.10 in total.
+
+| Run | Baseline | Descriptions | Fixed / broken | McNemar p |
+|---|---|---|---|---|
+| 1 | 59.6% | 59.4% | 29 / 30 | 1.00 |
+| 2 | 58.2% | 59.0% | 28 / 24 | 0.68 |
+| 3 | 59.2% | 59.2% | 28 / 28 | 1.00 |
+| **Average** | **59.0%** | **59.2%** | | |
+
+Accuracies here are over the 498 unique questions. Descriptions change about 11% of answers, twice as many as rerunning the baseline does (25 of 498, 5%), but they fix and break about the same number. They also cut crashes from about 1.5% to 0.5% of queries and cost 75% more per query.
+
 ### Model comparison
 
 Same 200 questions, same code. Qwen 2.5 Coder 7B runs locally through [Ollama](https://ollama.com) on a laptop GPU (GTX 1650), at no cost.
@@ -50,8 +64,8 @@ Same 200 questions, same code. Qwen 2.5 Coder 7B runs locally through [Ollama](h
 
 In short: none of the common tricks I tried beat the plain baseline by a statistically reliable margin. The only significant difference in the whole project came from changing the model. The remaining mistakes are consistent misreadings of the question or the data, not random slips.
 
-- **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs.
-- **Column descriptions may help, but I can't prove it.** They fixed 13 questions and broke 7 (p = 0.26). The self-correction run uses the same first prompt and its first attempts scored about 58%, so the 61% descriptions run was probably partly luck.
+- **Run-to-run noise is as big as the differences.** I ran the baseline and the sample-values variant twice each with identical settings. The baseline scored 58.5% then 58.0%, and sample values scored 60.5% then 57.0%. Even at temperature 0, the model changes its answer on about 7% of questions between runs on the 200-question subset, and 5% on all 500.
+- **Column descriptions don't help, and 200 questions fooled me at first.** On 200 questions they fixed 13 and broke 7 (61% against 58%, p = 0.26), which looked like a possible gain. On all 500 questions, three runs each, the gap shrank to 0.2 points, and no run came close to significance. The 61% was luck. This is the clearest example in the project of why one run on a small subset isn't enough.
 - **Random sample values and value matching did not help.** BIRD's hints already spell out most of the values a question needs, so finding them in the database adds little.
 - **Almost every miss is a wrong answer, not a crash.** Only 0 to 3 queries per run failed to execute.
 - **Self-correction removes crashes but barely changes accuracy.** 24 of 200 questions triggered a retry (an error, no rows, only NULLs, or too many rows). The retries fixed 2 answers and broke 1, and took crashed queries from 1 to 3 per run down to 0. It costs 1.15 model calls per question on average. The wrong answers that remain run fine and return rows that look reasonable, so simple result checks can't spot them.
@@ -82,7 +96,7 @@ In short: none of the common tricks I tried beat the plain baseline by a statist
 ## Limitations
 
 - **No stronger model.** I couldn't test one: on the free tier, Gemini 3.7 Flash allows 20 requests a day and 3.8 Flash was overloaded when I tried it.
-- **200 questions, mostly one run per variant.** With about 7% of answers changing between identical runs, only effects of roughly 10 points or more show up as significant. A real gain of 2 to 3 points would need the full 500 questions and repeated runs.
+- **Most variants have one run on 200 questions.** With 5 to 7% of answers changing between identical runs, only effects of roughly 10 points show up as significant there. I could afford the full 500 questions with three repeats for only the baseline and column descriptions.
 - **Execution accuracy is strict.** A correct answer with an extra column, a different float rounding, or different wording in a text result counts as wrong, and some reference answers are themselves questionable (see the error analysis).
 
 ## Setup
@@ -117,6 +131,7 @@ sql-agent run --variant self_correct
 sql-agent run --variant vote                  # 5 calls per question
 sql-agent run --variant hint_rules
 sql-agent run --provider ollama --model qwen2.5-coder:7b --rpm 0
+sql-agent run --variant descriptions --subset 0 --out results/full_run1   # all 500 questions, own folder per repeat
 sql-agent summary                             # prints the results table
 sql-agent chart                               # draws results/accuracy.png
 sql-agent compare results/A.jsonl results/B.jsonl   # fixed/broken counts and p-value
